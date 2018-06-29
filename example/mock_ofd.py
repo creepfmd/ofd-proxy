@@ -16,81 +16,93 @@
 #
 
 import asyncio
-import json
-import time
+import datetime
+from elasticsearch2 import Elasticsearch
 import argparse
-from ofd.protocol import SessionHeader, FrameHeader, unpack_container_message, pack_json, DOCS_BY_NAME, DocCodes, \
-    String
+import socket
+from ofd.protocol import SessionHeader, FrameHeader, unpack_container_message
 
-
-async def unpack_incoming_message(rd):
-    """
-    Прочитать входящий поток бинарных данных и распаковать их в json документ
-    """
-    session_raw = await rd.readexactly(SessionHeader.STRUCT.size)
-    session = SessionHeader.unpack_from(session_raw)
-    print(session)
-    container_raw = await rd.readexactly(session.length)
-    header_raw, message_raw = container_raw[:FrameHeader.STRUCT.size], container_raw[FrameHeader.STRUCT.size:]
-    header = FrameHeader.unpack_from(header_raw)
-    print(header)
-    return unpack_container_message(message_raw, b'0')[0], session, header
-
-
-def create_response(doc, in_session, in_header):
-    """
-    Запаковать в протокол "подтверждение оператора" от ОФД к кассе
-    :param doc: полученный документ
-    :param in_header: заголовок контейнера входящего сообщения
-    :param in_session: заголовок сессии входящего сообщения
-    :return: 
-    """
-    doc_body = doc[next(iter(doc))]  # получаем тело документа
-    message = {
-        'operatorAck': {
-            'ofdInn': '7704358518',  # ИНН Яндекс.ОФД
-            'fiscalDriveNumber': doc_body.get('fiscalDriveNumber'),
-            'fiscalDocumentNumber': doc_body.get('fiscalDocumentNumber'),
-            'dateTime': int(time.time()),
-            'messageToFn': {'ofdResponseCode': 0}  # код ответа 0 при успешном получении документа
-            # Теги ФПО и ФПП не указаны, т.к. должны быть добавлены реальным шифровальным комплексом
-        }
-    }
-    message_raw = pack_json(message, docs=DOCS_BY_NAME)
-
-    # в реальных ОФД FrameHeader формируется автоматически шифровальной машиной
-    out_header = FrameHeader(length=FrameHeader.STRUCT.size + len(message_raw),
-                             crc=0,
-                             doctype=DocCodes.OPERATOR_ACK,
-                             devnum=in_header.devnum,
-                             docnum=String.pack(str(doc_body.get('fiscalDocumentNumber'))),
-                             extra1=in_header.extra1,
-                             extra2=String.pack('0'.rjust(12)))
-
-    out_header.recalculate_crc(message_raw)
-    container_raw = out_header.pack() + message_raw
-
-    out_session = SessionHeader(pva=in_session.pva, fs_id=in_session.fs_id, length=len(container_raw), crc=0,
-                                flags=0b0000000000010100)
-
-    return out_session.pack() + container_raw
-
+ES_URL = "dev-elastic.lan.smclinic.ru"
+OFD_URL = "ofdt.platformaofd.ru"
+OFD_PORT = 19081
 
 async def handle_connection(rd, wr):
     """
     Пример использования протокола для эмуляции работы ОФД. Сервер принимает входящее сообщение и распаковывает его,
     выводя значения в stdout. В ответ сервер формирует сообщение "подтверждение оператора" и передает его обратно кассе.
-    Эмулятор работает без использования шифровальный машины, поэтому считаем, что сообщение приходит в ОФД 
+    Эмулятор работает без использования шифровальный машины, поэтому считаем, что сообщение приходит в ОФД
     в незашифрованном виде.
     :param rd: readable stream.
     :param wr: writable stream.
     """
     try:
-        doc, session, header = await unpack_incoming_message(rd)
-        print(json.dumps(doc, ensure_ascii=False, indent=4))
-        response = create_response(doc, in_session=session, in_header=header)
-        print('raw response', response)
-        wr.write(response)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((OFD_URL, OFD_PORT))
+
+        # Разбираем входящее сообщение
+        session_raw = await rd.readexactly(SessionHeader.STRUCT.size)
+        session = SessionHeader.unpack_from(session_raw)
+        print(session)
+        container_raw = await rd.readexactly(session.length)
+
+        # Входящее сообщение ККТ
+        header_raw, message_raw = container_raw[:FrameHeader.STRUCT.size], container_raw[FrameHeader.STRUCT.size:]
+        doc = unpack_container_message(message_raw, b'0')[0]
+        # print(json.dumps(doc, ensure_ascii=False, indent=4))
+        # Если тип документа 1 (продажа), то укладываем в эластик
+        if 'receipt' in doc:
+            if doc['receipt']['operationType'] == 1:
+                print('Продажа')
+                date = datetime.datetime.fromtimestamp(
+                    int(doc['receipt']['dateTime'])
+                ).strftime('%Y-%m-%d')
+                doctype = 'receipt-'+date
+                es = Elasticsearch(ES_URL)
+                res = es.index(index=doc['receipt']['userInn'], doc_type=doctype, id=doc['receipt']['fiscalDocumentNumber'], body=doc['receipt'])
+        """
+        {
+            "receipt": {
+                "kktRegId": "0000000011038612",
+                "fiscalDocumentNumber": 27,
+                "dateTime": 1528293720,
+                "operationType": 1,
+                "totalSum": 1290,
+                "items": [
+                    {
+                        "name": "Чипсы с беконом LAYS",
+                        "price": 550,
+                        "quantity": 2.345,
+                        "sum": 1290,
+                        "nds": 1,
+                        "ndsSum": 197,
+                        "productType": 1,
+                        "paymentType": 4
+                    }
+                ],
+                "cashTotalSum": 1290,
+                "ecashTotalSum": 0,
+                "operator": "СИС. АДМИНИСТРАТОР",
+            }
+        }
+        """
+
+        # Отправляем данные в ОФД
+        s.sendall(session_raw + container_raw)
+
+        # Получаем от ОФД ответ
+        session_raw_ofd = s.recv(SessionHeader.STRUCT.size)
+        session_ofd = SessionHeader.unpack_from(session_raw_ofd)
+
+        container_raw_ofd = s.recv(session_ofd.length)
+        # header_raw_ofd, message_raw_ofd = container_raw_ofd[:FrameHeader.STRUCT.size], container_raw_ofd[FrameHeader.STRUCT.size:]
+        s.close()
+
+        # Ответ ОФД
+        # doc_ofd = unpack_container_message(message_raw_ofd, b'0')[0]
+        # print(json.dumps(doc_ofd, ensure_ascii=False, indent=4))
+
+        # Пересылаем ответ ОФД на ККТ
+        wr.write(session_raw_ofd + container_raw_ofd)
     finally:
         wr.write_eof()
         wr.drain()
