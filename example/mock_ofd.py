@@ -17,12 +17,12 @@
 
 import asyncio
 import datetime
-from elasticsearch2 import Elasticsearch
+from elasticsearch import Elasticsearch
 import argparse
 import socket
 from ofd.protocol import SessionHeader, FrameHeader, unpack_container_message
 
-ES_URL = "dev-elastic.lan.smclinic.ru"
+ES_URL = "localhost"
 OFD_URL = "ofdt.platformaofd.ru"
 OFD_PORT = 19081
 
