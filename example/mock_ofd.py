@@ -56,6 +56,19 @@ async def handle_connection(rd, wr):
                 date = datetime.datetime.fromtimestamp(
                     int(doc['receipt']['dateTime'])
                 ).strftime('%Y-%m-%d')
+                doc['receipt']['dateTime'] = doc['receipt']['dateTime'] * 1000
+                doc['receipt']['totalSum'] = doc['receipt']['totalSum'] / 100
+                doc['receipt']['cashTotalSum'] = doc['receipt']['cashTotalSum'] / 100
+                doc['receipt']['ecashTotalSum'] = doc['receipt']['ecashTotalSum'] / 100
+                doc['receipt']['prepaidSum'] = doc['receipt']['prepaidSum'] / 100
+                doc['receipt']['creditSum'] = doc['receipt']['creditSum'] / 100
+                doc['receipt']['provisionSum'] = doc['receipt']['provisionSum'] / 100
+                doc['receipt']['nds18'] = doc['receipt']['nds18'] / 100
+                for x in doc['receipt']['items']:
+                    x['price'] = x['price'] / 100
+                    x['sum'] = x['sum'] / 100
+                    x['ndsSum'] = x['ndsSum'] / 100
+
                 doctype = 'receipt-'+date
                 es = Elasticsearch(ES_URL)
                 res = es.index(index=doc['receipt']['userInn'], doc_type=doctype, id=doc['receipt']['fiscalDocumentNumber'], body=doc['receipt'])
