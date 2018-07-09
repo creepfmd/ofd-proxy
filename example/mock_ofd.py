@@ -22,9 +22,7 @@ import argparse
 import socket
 from ofd.protocol import SessionHeader, FrameHeader, unpack_container_message
 
-ES_URL = "localhost"
-OFD_URL = "ofdt.platformaofd.ru"
-OFD_PORT = 19081
+ES_URL = "178.128.170.55"
 
 async def handle_connection(rd, wr):
     """
@@ -36,9 +34,6 @@ async def handle_connection(rd, wr):
     :param wr: writable stream.
     """
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.connect((OFD_URL, OFD_PORT))
-
         # Разбираем входящее сообщение
         session_raw = await rd.readexactly(SessionHeader.STRUCT.size)
         session = SessionHeader.unpack_from(session_raw)
@@ -50,6 +45,12 @@ async def handle_connection(rd, wr):
         doc = unpack_container_message(message_raw, b'0')[0]
         # print(json.dumps(doc, ensure_ascii=False, indent=4))
         # Если тип документа 1 (продажа), то укладываем в эластик
+        es = Elasticsearch(ES_URL)
+        kkm_source = es.search(index='config', doc_type='cashmachines',
+                        body={"query": {"match": {"kktRegId": doc['receipt']['kktRegId']}}},
+                        filter_path=['hits.hits._source'])
+        kkm = kkm_source['hits']['hits'][0]['_source']
+
         if 'receipt' in doc:
             if doc['receipt']['operationType'] == 1:
                 print('Продажа')
@@ -70,11 +71,7 @@ async def handle_connection(rd, wr):
                     x['ndsSum'] = x['ndsSum'] / 100
 
                 doctype = 'receipt-'+date
-                es = Elasticsearch(ES_URL)
-                kkm = es.search(index='config', doc_type='cashmachines',
-                                body={"query": {"match": {"kktRegId": doc['receipt']['kktRegId']}}},
-                                filter_path=['hits.hits._source'])
-                doc['receipt']['kkm'] = kkm['hits']['hits'][0]['_source']
+                doc['receipt']['kkm'] = kkm
                 res = es.index(index=doc['receipt']['userInn'], doc_type=doctype, id=(str(doc['receipt']['fiscalSign'])+'-'+str(doc['receipt']['fiscalDocumentNumber'])), body=doc['receipt'])
         """
         {
@@ -102,6 +99,8 @@ async def handle_connection(rd, wr):
             }
         }
         """
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.connect((kkm['ofd'], int(kkm['ofdPort'])))
 
         # Отправляем данные в ОФД
         s.sendall(session_raw + container_raw)
