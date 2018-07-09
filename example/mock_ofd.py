@@ -71,7 +71,11 @@ async def handle_connection(rd, wr):
 
                 doctype = 'receipt-'+date
                 es = Elasticsearch(ES_URL)
-                res = es.index(index=doc['receipt']['userInn'], doc_type=doctype, id=doc['receipt']['fiscalDocumentNumber'], body=doc['receipt'])
+                kkm = es.search(index='config', doc_type='cashmachines',
+                                body={"query": {"match": {"kktRegId": doc['receipt']['kktRegId']}}},
+                                filter_path=['hits.hits._source'])
+                doc['receipt']['kkm'] = kkm['hits']['hits'][0]['_source']
+                res = es.index(index=doc['receipt']['userInn'], doc_type=doctype, id=(str(doc['receipt']['fiscalSign'])+'-'+str(doc['receipt']['fiscalDocumentNumber'])), body=doc['receipt'])
         """
         {
             "receipt": {
